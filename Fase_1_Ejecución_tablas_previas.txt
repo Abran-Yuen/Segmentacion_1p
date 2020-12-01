@@ -1,0 +1,992 @@
+
+	
+	  DECLARE MONTH_ID INT64 DEFAULT 202006;  /* Mes datos*/
+    
+    DECLARE MONTH_ID_ST STRING DEFAULT '202006';  /* Mes datos*/
+    DECLARE MONTH_ID_ST_M1 STRING DEFAULT '202005'; /* Mes datos menos 1*/
+    DECLARE MONTH_ID_ST_M2 STRING DEFAULT '202004'; /* Mes datos menos 2*/
+    DECLARE MONTH_ID_ST_M3 STRING DEFAULT '202003'; /* Mes datos menos 3*/
+      
+    DECLARE VAR_FIRST_DAY_DATE_CURR_MONTH_DT DATE DEFAULT '2020-06-01';
+    DECLARE VAR_LAST_DAY_DATE_CURR_MONTH_DT DATE DEFAULT '2020-06-30';
+    
+    DECLARE VAR_FIRST_DATE_PRED_MONTH_ST STRING DEFAULT '2020-07-01'; /* Fecha de inicio de mes de predicción del modelo. Para saber si el descuento termina en los dos proximos meses*/
+    DECLARE VAR_LAST_DATE_PRED_MONTH_ST STRING DEFAULT '2020-08-31'; /* Fecha de fin de mes de predicción del modelo. Para saber si el descuento termina en los dos proximos meses*/
+    
+   # DECLARE VERSION_ST STRING DEFAULT '3'; /*Versión del modelo*/
+    
+    
+    /************************************************************
+    *
+    *     CODIGO DE SEGMENTACION
+    *
+    *
+    **************************************************************/
+    
+    
+    /***********************************************************************************************************
+          
+          1. Información del router
+          
+    ***********************************************************************************************************/
+    
+                DROP TABLE IF EXISTS `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.INFORMACION_ROUTER`;
+                
+                create table `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.INFORMACION_ROUTER` AS
+                select 
+                    FORMAT_DATE('%Y%m', date(created_at)) as mes,
+                    latest_workorder_id, 
+                    station.tx_bitrate,
+                    station.signal,
+                    measurement_id
+                from `mm-datamart-kd.QOS.fon_interface_station`
+                where station.tx_bitrate is not null 
+               -- and CREATED_AT BETWEEN VAR_FIRST_DAY_DATE_CURR_MONTH_DT AND VAR_LAST_DAY_DATE_CURR_MONTH_DT;
+               and CREATED_AT BETWEEN '2020-07-01' AND '2020-07-31'
+               ;
+                
+          
+                DROP TABLE  IF EXISTS `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.INFORMACION_ROUTER_MEDIDAS`;
+                
+                create table `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.INFORMACION_ROUTER_MEDIDAS` as
+                select
+                    a.customer_id,
+                    a.segment_ds,
+                    a.brand_ds,
+                    a.mes,
+                    sum(ifnull(tx_bitrate,0))/countif(tx_bitrate is not null) as avg_tx_bitrate,
+                    sum(ifnull(signal,0))/countif(signal is not null) as avg_signal,
+                    sum(case when tx_bitrate<10 then 1 else 0 end) as bit_rate,
+                    sum(case when signal < -80 then 1 else 0 end) as low_signal
+                from (
+                      select 
+                          a.customer_id,
+                          a.segment_ds,
+                          a.brand_ds,
+                          b.*
+                      from
+                            `mm-datamart-kd.SERVICES.service_base_net` a
+                      inner join
+                          `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.INFORMACION_ROUTER` b
+                      on b.latest_workorder_id=cast(a.order_fix_id as string)
+                     ) a
+                  group by 
+                    a.customer_id,
+                    a.segment_ds,
+                    a.brand_ds,
+                    a.mes;
+                   
+                   
+     /***********************************************************************************************************
+          
+          2. Llamadas de ATC. (Se selecciona información del mes actual)
+          
+    ***********************************************************************************************************/
+     DROP TABLE IF EXISTS `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.ATC_CALLS_TIPOLOGY`;
+      
+      CREATE TABLE  `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.ATC_CALLS_TIPOLOGY` AS
+      SELECT
+          A.CUSTOMER_ID,
+          A.BRAND_DS,
+          A.EOP,
+          NUM_LLAMADAS_NETWORK AS NUM_LLAMADAS_NETWORK,
+          NUM_LLAMADAS_PROCESS AS NUM_LLAMADAS_PROCESS,
+          NUM_LLAMADAS_COMPETITION AS NUM_LLAMADAS_COMPETITION,
+          NUM_LLAMADAS_WRONG_TARIFF AS NUM_LLAMADAS_WRONG_TARIFF,
+          NUM_LLAMADAS_HEAVY_CALLERS AS NUM_LLAMADAS_HEAVY_CALLERS,
+          CASE
+            WHEN NUM_LLAMADAS_NETWORK>=NUM_LLAMADAS_PROCESS AND NUM_LLAMADAS_NETWORK>=NUM_LLAMADAS_COMPETITION 
+            AND NUM_LLAMADAS_NETWORK>=NUM_LLAMADAS_WRONG_TARIFF AND NUM_LLAMADAS_NETWORK>0 THEN 'NETWORK'
+            WHEN NUM_LLAMADAS_WRONG_TARIFF>=NUM_LLAMADAS_PROCESS AND NUM_LLAMADAS_WRONG_TARIFF>=NUM_LLAMADAS_COMPETITION 
+            AND NUM_LLAMADAS_WRONG_TARIFF>NUM_LLAMADAS_NETWORK  AND NUM_LLAMADAS_WRONG_TARIFF>0 THEN 'WRONG TARIFF'  
+            WHEN NUM_LLAMADAS_COMPETITION>=NUM_LLAMADAS_PROCESS AND NUM_LLAMADAS_COMPETITION>NUM_LLAMADAS_WRONG_TARIFF 
+            AND NUM_LLAMADAS_COMPETITION>NUM_LLAMADAS_NETWORK  AND NUM_LLAMADAS_COMPETITION>0 THEN 'COMPETITION'
+            WHEN NUM_LLAMADAS_PROCESS>NUM_LLAMADAS_COMPETITION AND NUM_LLAMADAS_PROCESS>NUM_LLAMADAS_WRONG_TARIFF 
+            AND NUM_LLAMADAS_PROCESS>NUM_LLAMADAS_NETWORK  AND NUM_LLAMADAS_PROCESS>0 THEN 'PROCESS'   
+            WHEN NUM_LLAMADAS_COMPETITION=0 AND NUM_LLAMADAS_WRONG_TARIFF=0 
+            AND NUM_LLAMADAS_NETWORK=0 AND NUM_LLAMADAS_PROCESS=0 AND NUM_LLAMADAS_HEAVY_CALLERS>0 THEN 'HEAVY CALLERS'
+          END AS SEGMENTO
+      FROM (
+      
+            SELECT
+                A.CUSTOMER_ID,
+                A.BRAND_DS,
+                A.EOP,
+                SUM(CASE
+                    WHEN SEGMENTO_1_LLAMADA like '%Network%' THEN LLAMADAS 
+                    ELSE 0 
+                END) AS NUM_LLAMADAS_NETWORK,
+                SUM(CASE
+                    WHEN SEGMENTO_1_LLAMADA like '%Process%'  THEN LLAMADAS 
+                    ELSE 0 
+                END) AS NUM_LLAMADAS_PROCESS,
+                SUM(CASE
+                    WHEN SEGMENTO_1_LLAMADA like '%Competition%'  THEN LLAMADAS 
+                    ELSE 0 
+                END) AS NUM_LLAMADAS_COMPETITION,
+                SUM(CASE
+                    WHEN SEGMENTO_1_LLAMADA like '%Wrong tariff%' THEN LLAMADAS 
+                    ELSE 0 
+                END) AS NUM_LLAMADAS_WRONG_TARIFF,
+                SUM(CASE
+                    WHEN SEGMENTO_1_LLAMADA like '%Heavy callers%'  THEN LLAMADAS 
+                    ELSE 0 
+                END) AS NUM_LLAMADAS_HEAVY_CALLERS
+            FROM (
+             SELECT
+                A.*,
+                b.CLASIFICACION AS SEGMENTO_1_LLAMADA
+
+             FROM ( 
+                select
+                    distinct 
+                    a.customer_id,
+                    a.brand_ds,
+                    a.eop,
+                    primera_call_reason,
+                    b.llamadas
+                from(
+                    select 
+                            customer_id,
+                            ucid,
+                            brand_ds,
+                            ARRAY_REVERSE(categories_subcategories_open_question)[SAFE_OFFSET(0)] as primera_call_reason,
+                            CASE
+                              WHEN EXTRACT(MONTH FROM start_time)<10 THEN CONCAT(EXTRACT(YEAR FROM start_time) ,'0',EXTRACT(MONTH FROM start_time))
+                              ELSE CONCAT(EXTRACT(YEAR FROM start_time) ,EXTRACT(MONTH FROM start_time))
+                            END AS EOP,
+                            day,
+                            start_time
+                          from 
+                            `mm-datamart-kd.ATC.call` 
+                          where 
+                            ( 
+                                ARRAY_REVERSE(categories_subcategories_open_question)[SAFE_OFFSET(0)] is not null and
+                                customer_id is not null and ivr_absorption is false and talk_time>0
+                            ) and  ( call_type='INCOMING'   or   call_type='INGOING' )                 
+                      )A
+                   inner join
+                   (
+                         select 
+                            customer_id, brand_ds, count(distinct ucid) as llamadas,
+                            CASE
+                              WHEN EXTRACT(MONTH FROM start_time)<10 THEN CONCAT(EXTRACT(YEAR FROM start_time) ,'0',EXTRACT(MONTH FROM start_time))
+                              ELSE CONCAT(EXTRACT(YEAR FROM start_time) ,EXTRACT(MONTH FROM start_time))
+                            END EOP
+                         from 
+                            `mm-datamart-kd.ATC.call`
+                         where   ( call_type='INCOMING'   or   call_type='INGOING' )   
+                          group by 
+                                customer_id, brand_ds, 
+                          CASE
+                              WHEN EXTRACT(MONTH FROM start_time)<10 THEN CONCAT(EXTRACT(YEAR FROM start_time) ,'0',EXTRACT(MONTH FROM start_time))
+                              ELSE CONCAT(EXTRACT(YEAR FROM start_time) ,EXTRACT(MONTH FROM start_time))
+                          END
+                   )b
+                   on a.customer_id=b.customer_id and a.brand_ds=b.brand_ds and a.eop=b.eop
+                  ) A
+             left join
+                `bi-data-science-pilots.DESARROLLO.CALLS_TICKETS_DICTIONARY` B 
+             ON primera_call_reason=B.CATEGORIA
+          ) A
+          GROUP BY CUSTOMER_ID, BRAND_DS, EOP
+       ) A;
+  
+  
+      DROP table  IF EXISTS `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.ATC_CALLS_TIPOLOGY_V2`;
+      
+      CREATE TABLE `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.ATC_CALLS_TIPOLOGY_V2` AS
+      SELECT 
+          CUSTOMER_ID,
+          NUM_LLAMADAS_NETWORK,
+          NUM_LLAMADAS_PROCESS,
+          NUM_LLAMADAS_COMPETITION,
+          NUM_LLAMADAS_WRONG_TARIFF,
+          NUM_LLAMADAS_HEAVY_CALLERS,        
+          IFNULL(NUM_LLAMADAS_NETWORK,0)+
+          IFNULL(NUM_LLAMADAS_PROCESS,0)+
+          IFNULL(NUM_LLAMADAS_COMPETITION,0)+
+          IFNULL(NUM_LLAMADAS_WRONG_TARIFF,0)+
+          IFNULL(NUM_LLAMADAS_HEAVY_CALLERS,0) AS NUM_LLAMADAS_ATC,
+          SEGMENTO
+      FROM 
+          `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.ATC_CALLS_TIPOLOGY`
+      WHERE
+          cast(EOP as INT64)=MONTH_ID AND BRAND_DS='YOIGO';
+          
+          
+    
+          
+          
+          
+         DROP TABLE IF EXISTS `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.LLAMADAS_ATC_MENSUAL`;
+         
+         CREATE TABLE `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.LLAMADAS_ATC_MENSUAL` AS
+         SELECT
+              BRAND_DS,
+              CUSTOMER_ID,
+              EOP,
+              SUM(IS_TOTA_WAIT_MORE_5MIN) AS NUM_TOTA_WAIT_MORE_5MIN,
+              COUNTIF(redial_48h = true) AS NUM_RECA,
+              sum(rellamada) as rellamada,
+              SUM(waiting_time)/COUNT(DISTINCT UCID) AS TIEMPO_MEDIO_ESPERA
+        FROM (
+            SELECT 
+                BRAND_DS,
+                CAST(CUSTOMER_ID AS STRING) AS CUSTOMER_ID,
+                REPLACE(SUBSTR(CAST(DAY AS STRING),1,7),'-','') AS EOP,
+                UCID,    
+                redial_48h,
+                redial,
+                ivr_absorption,
+                case when redial is true and ivr_absorption is false then 1 else 0 end as rellamada,
+                CASE -- Is the total of waiting times
+                    WHEN waiting_time > 300 THEN 1
+                    ELSE 0
+                END AS IS_TOTA_WAIT_MORE_5MIN,  
+                waiting_time
+            FROM `mm-datamart-kd.ATC.call`
+            WHERE brand_ds IN ('YOIGO')
+                AND (BRAND_DS IS NOT NULL
+                AND CUSTOMER_ID IS NOT NULL)
+              ) A
+        GROUP BY BRAND_DS,
+            CUSTOMER_ID,
+            EOP;
+          
+ /*********************************************************************************************************
+ *
+ *           3.RECLAMACIONES BLUE JIRAS
+ *
+ ********************************************************************************************************/   
+ 
+    DROP TABLE IF EXISTS  `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.RECLAMACIONES_BLUE_JIRA`;
+
+    CREATE TABLE `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.RECLAMACIONES_BLUE_JIRA` AS
+    SELECT
+        CUSTOMER_ID,
+        BRAND_DS,
+        EOP_MONTH,
+        SUM(BILLING_CLAIMS) AS BILLING_CLAIMS,
+        SUM(CLAIMS) AS CLAIMS,
+        SUM(MOBILE_INCIDENCES) AS MOBILE_INCIDENCES,
+        SUM(Mobile_Red_Incidences) as MOBILE_RED_INCIDENCES,
+        AVG(horas_resolucion_reclamacion) as tiempo_resolucion_reclamacion,
+        AVG(horas_resolucion_incidencia) as tiempo_resolucion_incidencia,
+        SUM(Incidencias_High_Priority) AS Incidencias_High_Priority,
+        SUM(Jiras_Reclamacion_Movil) as Jiras_Reclamacion_Movil
+    FROM ( 
+        select
+                customer_id,
+                brand_ds,
+                created_ts,
+                parse_date('%Y-%m-%d',substr(cast(created_ts as string),1,10)) as fecha_jira,
+                substr(cast(created_ts as string),1,4)||substr(cast(created_ts as string),6,2)  as eop_month,
+                case when ticket_type like '%Reclamación%' and tipology in ('Recarga','Cobros','Desacuerdos','Promoción mal Aplicada') then 1 else 0 end as Billing_Claims,
+                case when ticket_type like '%Reclamación%' then 1 else 0 end as Claims,
+                case when ticket_type like '%Incidencia%' then 1 else 0 end as Mobile_Incidences,
+                case when project_pkey in ('CC', 'MM') and issuetype = 'Error en la línea' and line_error_type in 
+                ('Compartir-no compartir internet', 'Error activación nueva numeración', 'Error al cambiar el ICC', 'Error en MySim durante la portabilidad', 'Error en MySim tras la portabilidad', 'Es el primer dia en Yoigo y no tiene servicio', 'Estado Instalado sin expedición', 'No puede navegar porque salta Landig Page', 'No se puede poner / quitar Bloqueo', 'No se puede poner/quitar bloqueo', 'Problema activación de ICC', 'Problema con Bonos', 'Problemas con bonos y ampliaciones', 'Problemas con la Recarga', 'Problemas con línea PREPAGO', 'Reactivar línea', 'Recuperar baja manual errónea', 'Recuperar baja móvil manual errónea', 'Recuperar línea por error del sistema', 'Relanzar portabilidad', 'Problema cambio SIM') then 1 else 0 end as Mobile_Red_Incidences,
+                case when ticket_type like '%Reclamación%' then TIMESTAMP_DIFF(resolution_ts, created_ts, hour) else 0 end as horas_resolucion_reclamacion,
+                case when ticket_type like '%Incidencia%' then TIMESTAMP_DIFF(resolution_ts, created_ts, hour) else 0 end as horas_resolucion_incidencia  ,
+                case when ticket_type like '%Incidencia%' and priority in ('Alta','Media') then 1 else 0 end as Incidencias_High_Priority,
+                case when (issuetype like '%No he podido usar mi móvil%' or issuetype like '%Se registra en red pero no tiene servicio%'
+                 or issuetype like '%Problemas Durante el proceso de Portabilidad%'
+                 or issuetype like '%Roto%'
+                 or issuetype like '%No recibe llamadas de fijos%'
+                 or issuetype like '%Instalación / Provisión%'
+                 or issuetype like '%No funciona internet%'
+                 or issuetype like '%Problemas de Terminal%'
+                 ) then 1 else 0 end as Jiras_Reclamacion_Movil
+        from 
+            `mm-datamart-kd.TICKETING.jira_cc_base_ticketing`
+    ) A
+    WHERE ( BILLING_CLAIMS = 1 OR CLAIMS=1 OR MOBILE_INCIDENCES =1
+    OR Jiras_Reclamacion_Movil=1 OR Mobile_Red_Incidences=1
+    ) AND
+    (CUSTOMER_ID IS NOT NULL OR CUSTOMER_ID <>'N/A' OR CUSTOMER_ID<>'0')  AND FECHA_JIRA>='2019-01-01'
+    GROUP BY 
+        CUSTOMER_ID,
+        BRAND_DS,
+        EOP_MONTH;
+        
+        
+     
+        
+        
+        
+/*********************************************************************************************************************************
+*
+*      Obtenemos la información de clientes
+*
+**********************************************************************************************************************************/
+
+
+    DROP TABLE IF EXISTS `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.INFORMACION_CLIENTE`;
+       
+       CREATE TABLE `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.INFORMACION_CLIENTE` AS
+         select 
+              A.CUSTOMER_ID,
+              A.EOP,
+              A.LAST_ACTIVATION_CUST_BUND_DAYS as FIRST_ACCO_BUND_DAYS,
+              A.NUM_GB_3G_CURR,
+              A.NUM_GB_2G_CURR,
+              A.NUM_GB_4G_CURR,
+              A.PERC_GB_NATR_CURR,
+              A.IVR_NUM_CALLS,
+              A.IVR_NUM_RECA,
+              A.IVR_NUM_SECS_TOTA_WAIT,
+              A.MIN_LLAMADAS_COMPETENCIA_OUT,
+              A.MIN_LLAMADAS_COMPETENCIA_IN,
+              B.cust_n_mob_port,
+              A.FRIENDS_IS_CHURN_GMM,
+              A.NUM_LINES_POST_DEAC,
+              A.NUM_LINES_POST_TOTA,
+              A.NUM_LINES_POST_CURR,
+              A.NUM_MONTHS_LINE_TYPE_FIXE_POST_ACT,
+              A.NUM_SEGM_RESI_CURR,
+              A.KPI_MONTHS_PAYTERM,
+              A.CUST_BUNDLE_CURR,
+              A.FACT_BONO_DISCOUNT,
+              A.Fact_LOYALTY_discount,
+              A.Fact_other,
+              A.Fact_QUOTA,
+              A.Fact_QUOTA_discount,
+              A.Fact_USAGE,
+              A.Fact_XSELL_DISCOUNT,
+              A.IS_CUST_TECH_ADSL_CURR,
+              B.cust_n_fix_port,
+              
+             A.NUM_LINE_KPI_QOE_FIXE,
+             A.NUM_LINE_THR_QOE_FIXE,                 
+             A.AVG_KPI_QOE_FIXE,
+             A.AVG_THR_QOE_FIXE, 
+             A.NUM_THR_QOE_FIXE_UNKN,
+             A.NUM_THR_QOE_FIXE_1,
+            A.NUM_THR_QOE_FIXE_2,
+            A.NUM_THR_QOE_FIXE_3,
+            A.NUM_THR_QOE_FIXE_4,
+            A.NUM_THR_QOE_FIXE_5,                        
+            A.AVG_KPI_AVAI_FLAT_FIXE,
+            A.AVG_KPI_LATE_TIME_FIXE,
+            A.SUM_KPI_WIFI_COMP_FIXE,
+            A.SUM_THR_UNCO_COMP_FIXE,
+            A.SUM_KPI_SYNC_COMP_FIXE,  
+            
+             A.NUM_LINE_KPI_QOE_MOBI,
+            A.NUM_LINE_THR_QOE_MOBI,            
+            A.AVG_KPI_QOE_MOBI,
+             A.AVG_THR_QOE_MOBI,           
+            A.NUM_THR_QOE_MOBI_UNKN,
+             A.NUM_THR_QOE_MOBI_1,
+             A.NUM_THR_QOE_MOBI_2,
+             A.NUM_THR_QOE_MOBI_3,
+             A.NUM_THR_QOE_MOBI_4,
+             A.NUM_THR_QOE_MOBI_5,
+             A.AVG_DL_PEAK_THR_KBPS_MOBI,
+            A.AVG_KPI_PERC_CSS_MOBI,
+             A.AVG_KPI_PERC_CDR_MOBI,
+             ROUND(ifnull(A.Fact_BONO_discount,0)+
+             ifnull(A.Fact_LOYALTY_discount,0)+
+             ifnull(A.Fact_other,0)+
+             ifnull(A.Fact_QUOTA,0)+
+             ifnull(A.Fact_QUOTA_discount,0)+
+             ifnull(A.Fact_USAGE,0)+
+             ifnull(A.Fact_XSELL_DISCOUNT,0),2) AS FACTURACION_USO
+         from
+              `bi-data-science-pilots.MASDATA.brand_yoigo_monthly_board_202*` A
+         LEFT JOIN
+               `bi-data-science-pilots.MASDATA.yoigo_master_table_202*` B
+         ON A.CUSTOMER_ID=B.CUSTOMER_ID AND A.EOP=B.EOP
+         WHERE 
+              IS_CUST_BILL_POST_SEGM_RESI_CURR is TRUE AND CUST_BUNDLE_CURR='FMC';
+
+
+    DROP TABLE IF EXISTS  `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.SELECT_INFO_CLIENTE`;
+    
+    CREATE TABLE `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.SELECT_INFO_CLIENTE` AS
+    SELECT 
+        CUSTOMER_ID,
+        EOP,
+        IFNULL(FIRST_ACCO_BUND_DAYS,0) as FIRST_ACCO_BUND_DAYS,
+
+        case 
+            when (NUM_GB_3G_CURR+NUM_GB_2G_CURR+NUM_GB_4G_CURR)>0 then 
+                ROUND((NUM_GB_3G_CURR+NUM_GB_2G_CURR)/(NUM_GB_3G_CURR+NUM_GB_2G_CURR+NUM_GB_4G_CURR),2)
+            ELSE 0
+        END AS PORC_BAJA_CONEXION,
+        IFNULL(NUM_GB_3G_CURR,0.0) AS NUM_GB_3G_CURR,
+        IFNULL(NUM_GB_2G_CURR,0.0) AS NUM_GB_2G_CURR,
+        IFNULL(NUM_GB_4G_CURR,0.0) AS NUM_GB_4G_CURR,
+        IFNULL(IVR_NUM_CALLS,0) as IVR_NUM_CALLS,
+        IFNULL(MIN_LLAMADAS_COMPETENCIA_OUT,0) as MIN_LLAMADAS_COMPETENCIA_OUT,
+        IFNULL(MIN_LLAMADAS_COMPETENCIA_IN,0) as MIN_LLAMADAS_COMPETENCIA_IN,
+        IFNULL(cust_n_mob_port,0) as cust_n_mob_port,
+        (IVR_NUM_SECS_TOTA_WAIT*1.0)/60 as MIN_WAIT,
+        
+        case when FRIENDS_IS_CHURN_GMM is null then 0 else FRIENDS_IS_CHURN_GMM end as IS_CHURN_GMM,
+        IFNULL(NUM_LINES_POST_DEAC,0) as NUM_LINES_POST_DEAC,
+        IFNULL(NUM_LINES_POST_TOTA,0) as NUM_LINES_POST_TOTA,
+        IFNULL(NUM_LINES_POST_CURR,0) as NUM_LINES_POST_CURR,
+        IFNULL(NUM_MONTHS_LINE_TYPE_FIXE_POST_ACT,0) as NUM_MONTHS_LINE_TYPE_FIXE_POST_ACT,
+        IFNULL(NUM_SEGM_RESI_CURR,0) as NUM_SEGM_RESI_CURR,
+        IFNULL(KPI_MONTHS_PAYTERM,0) as KPI_MONTHS_PAYTERM,
+        CUST_BUNDLE_CURR as CUST_BUNDLE,
+        IFNULL(FACT_BONO_DISCOUNT,0.0) as FACT_BONO_DISCOUNT,
+        IFNULL(Fact_LOYALTY_discount,0.0) as Fact_LOYALTY_discount,
+        IFNULL(Fact_other,0.0) as Fact_other,
+        IFNULL(Fact_QUOTA,0.0) as Fact_QUOTA,
+        IFNULL(Fact_QUOTA_discount,0.0) as Fact_QUOTA_discount,
+        IFNULL(Fact_USAGE,0.0) as Fact_USAGE,
+        IFNULL(Fact_XSELL_DISCOUNT,0.0) as Fact_XSELL_DISCOUNT,
+        IS_CUST_TECH_ADSL_CURR as IS_CUST_TECH_ADSL_CURR,
+        IFNULL(cust_n_fix_port,0.0) as cust_n_fix_port,
+        
+        IFNULL(NUM_LINE_KPI_QOE_FIXE,0.0) AS NUM_LINE_KPI_QOE_FIXE,
+        IFNULL(NUM_LINE_THR_QOE_FIXE,0.0) AS  NUM_LINE_THR_QOE_FIXE,                
+        IFNULL(AVG_KPI_QOE_FIXE,0.0) AS AVG_KPI_QOE_FIXE,
+        IFNULL(AVG_THR_QOE_FIXE, 0.0) AS AVG_THR_QOE_FIXE,
+        IFNULL(NUM_THR_QOE_FIXE_UNKN,0.0) AS NUM_THR_QOE_FIXE_UNKN,
+        IFNULL(NUM_THR_QOE_FIXE_1,0.0) AS NUM_THR_QOE_FIXE_1,
+        IFNULL(NUM_THR_QOE_FIXE_2,0.0) AS NUM_THR_QOE_FIXE_2,
+        IFNULL(NUM_THR_QOE_FIXE_3,0.0) AS NUM_THR_QOE_FIXE_3,
+        IFNULL(NUM_THR_QOE_FIXE_4,0.0) AS NUM_THR_QOE_FIXE_4,
+        IFNULL(NUM_THR_QOE_FIXE_5,0.0) AS NUM_THR_QOE_FIXE_5,              
+        IFNULL(AVG_KPI_AVAI_FLAT_FIXE,0.0) AS AVG_KPI_AVAI_FLAT_FIXE,
+        IFNULL(AVG_KPI_LATE_TIME_FIXE,0.0) AS AVG_KPI_LATE_TIME_FIXE,
+        IFNULL(SUM_KPI_WIFI_COMP_FIXE,0.0) AS SUM_KPI_WIFI_COMP_FIXE,
+        IFNULL(SUM_THR_UNCO_COMP_FIXE,0.0) AS SUM_THR_UNCO_COMP_FIXE,
+        IFNULL(SUM_KPI_SYNC_COMP_FIXE,0.0) AS   SUM_KPI_SYNC_COMP_FIXE,
+        IFNULL(NUM_LINE_KPI_QOE_MOBI,0.0) AS NUM_LINE_KPI_QOE_MOBI,
+        IFNULL(NUM_LINE_THR_QOE_MOBI,0.0) AS  NUM_LINE_THR_QOE_MOBI,           
+        IFNULL(AVG_KPI_QOE_MOBI,0.0) AS AVG_KPI_QOE_MOBI,
+        IFNULL(AVG_THR_QOE_MOBI,0.0) AS   AVG_THR_QOE_MOBI,         
+        IFNULL(NUM_THR_QOE_MOBI_UNKN,0.0) AS NUM_THR_QOE_MOBI_UNKN,
+        IFNULL(NUM_THR_QOE_MOBI_1,0.0) AS NUM_THR_QOE_MOBI_1,
+        IFNULL(NUM_THR_QOE_MOBI_2,0.0) AS NUM_THR_QOE_MOBI_2,
+        IFNULL(NUM_THR_QOE_MOBI_3,0.0) AS NUM_THR_QOE_MOBI_3,
+        IFNULL(NUM_THR_QOE_MOBI_4,0.0) AS NUM_THR_QOE_MOBI_4,
+        IFNULL(NUM_THR_QOE_MOBI_5,0.0) AS NUM_THR_QOE_MOBI_5,
+        IFNULL(AVG_DL_PEAK_THR_KBPS_MOBI,0.0) AS AVG_DL_PEAK_THR_KBPS_MOBI,
+        IFNULL(AVG_KPI_PERC_CSS_MOBI,0.0) AS AVG_KPI_PERC_CSS_MOBI,
+        IFNULL(AVG_KPI_PERC_CDR_MOBI,0.0) AS AVG_KPI_PERC_CDR_MOBI,
+        IFNULL(FACTURACION_USO,0.0) as FACTURACION_USO 
+    FROM 
+          `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.INFORMACION_CLIENTE`
+    WHERE EOP=MONTH_ID_ST;
+
+
+
+
+
+/*******************************************************************************************************************
+     
+     4. Tablas de Issue Calls
+
+********************************************************************************************************************/
+
+
+          DROP TABLE IF EXISTS  `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.ISSUE_CALLS_1`;
+
+          CREATE TABLE `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.ISSUE_CALLS_1` AS 
+          SELECT C.FECHA, c.MSISDN, C.CHANNEL, C.BRAND, C.ISSUE_CALL, C.GROUP_TEXT, FECHA_OR, MATCH_M ,EOP_MONTH
+          FROM (
+              SELECT DISTINCT A.*,
+              --normaliza_texto(case when upper(B.issue_call) in ('FALSE','NO','0') THEN 'NO' WHEN upper(B.issue_call) in ('TRUE','SI', '1') THEN 'SI' ELSE 'REVISAR' END) AS ISSUE_CALL,
+              case when B.issue_call is true then 'SI' WHEN B.issue_call is false then 'NO' END AS ISSUE_CALL
+              FROM (
+                  SELECT distinct
+                  MSISDN,
+                  SUBSTR(REPLACE(CAST(EXTRACT(DATE FROM CUR_TIMESTAMP) AS STRING),'-',''),1,6) AS EOP_MONTH,
+                  _TABLE_SUFFIX as PARTICION,
+                  EXTRACT(DATE FROM CUR_TIMESTAMP) AS FECHA_OR,
+                  REPLACE(CAST(EXTRACT(DATE FROM CUR_TIMESTAMP) AS STRING),'-','') AS FECHA,
+                  replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(upper(CHANNEL),"…",""),"-",""),"–",""),',',""),"Á","A"),"Ó","O"),"É","E"),"Í","I"),"Ú","U"),"/",""),".",""),"  "," "),"  "," ") as CHANNEL,
+                  replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(upper(brand),"…",""),"-",""),"–",""),',',""),"Á","A"),"Ó","O"),"É","E"),"Í","I"),"Ú","U"),"/",""),".",""),"  "," "),"  "," ") as BRAND,
+                  replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(upper(MATCH_M),"…",""),"-",""),"–",""),',',""),"Á","A"),"Ó","O"),"É","E"),"Í","I"),"Ú","U"),"/",""),".",""),"  "," "),"  "," ") as MATCH_M,
+                  replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(upper(GROUP_TEXT),"…",""),"-",""),"–",""),',',""),"Á","A"),"Ó","O"),"É","E"),"Í","I"),"Ú","U"),"/",""),".",""),"  "," "),"  "," ") as GROUP_TEXT
+                  from `mm-datamart-kd.ATC.mosaic_2*`
+                  WHERE CHANNEL IN ("Llamada recepción","Chat SMS")
+                  AND GROUP_TEXT IN('ATC', 'ATC CONVERGENTE', 'ATC MÓVIL', 'Averías Residencial N1', 'Averías N2') 
+                  and concat('2',_TABLE_SUFFIX)>='20200101'
+                  ) A
+              LEFT JOIN `mm-datamart-kd.ATC.master_mosaic_category_issue_call` B
+              on replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(upper(A.MATCH_M),"…",""),"-",""),"–",""),',',""),"Á","A"),"Ó","O"),"É","E"),"Í","I"),"Ú","U"),"/",""),".",""),"  "," "),"  "," ") =replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(upper(B.category),"…",""),"-",""),"–",""),',',""),"Á","A"),"Ó","O"),"É","E"),"Í","I"),"Ú","U"),"/",""),".",""),"  "," "),"  "," ")
+              ) C
+          where C.ISSUE_CALL='SI';
+
+
+     DROP TABLE IF EXISTS  `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.ISSUE_CALLS_2`;
+
+     CREATE TABLE `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.ISSUE_CALLS_2` AS
+     select a.* , serv.customer_id, segment_ds
+     from `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.ISSUE_CALLS_1` a
+     left join `mm-datamart-kd.SERVICES.service_base_net` serv 
+     on cast (a.MSISDN as string) = cast (serv.phone_nm as string) 
+     and(deactivation_date IS NULL OR deactivation_date > VAR_LAST_DAY_DATE_CURR_MONTH_DT) AND activation_date <= VAR_LAST_DAY_DATE_CURR_MONTH_DT
+     AND SUBSTR(FECHA,1,6)= MONTH_ID_ST;
+                   
+      /*
+         EXCESO DE CONSUMO
+      */
+
+DROP TABLE IF EXISTS `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.CONSUMO_POR_LINEA`;
+
+CREATE TABLE `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.CONSUMO_POR_LINEA` AS
+SELECT
+        Tablon.eop_month_id,Tablon.brand_ds,Tablon.customer_id,Tablon.CUST_BUNDLE,Tablon.GDPR_Never_Call,
+        A.rn,A.LINEA_PRINC_PAQUETE,A.account_id, A.phone_nm,A.segment_ds,A.tariff_id,A.tariff_ds,A.EUR_USAGE,A.EUR_QUOTA,A.EUR_BONO,A.EUR_BONO_DISCOUNT,
+        IFNULL(B.Mean_GB_Extra, 0) as Mean_GB_Extra,IFNULL(B.Lineas_Extra_Customer, 0) as Lineas_Extra_Customer,
+        IFNULL(C.GB_Total_PRINCIPALES,0)+IFNULL(B.Mean_GB_Extra, 0) as GB_Total,
+        TARIFARIO.GB_Tarifa,TARIFARIO.TARIFF_TYPE,
+        A.EUR_BONO+A.EUR_BONO_DISCOUNT as EUR_BONO_PAGADO,
+        C.GB_Total_PRINCIPALES+IFNULL(B.Mean_GB_Extra, 0)-TARIFARIO.GB_Tarifa as GB_Exceso,
+        CASE WHEN IFNULL(C.GB_Total_PRINCIPALES,0)+IFNULL(B.Mean_GB_Extra, 0)-TARIFARIO.GB_Tarifa>0 then 1 else 0 end as flag_GB_Exceso,
+        CASE WHEN IFNULL(C.GB_Total_PRINCIPALES,0)+IFNULL(B.Mean_GB_Extra, 0)-TARIFARIO.GB_Tarifa>1 then 1 else 0 end as flag_1GB_Exceso,
+        CASE WHEN IFNULL(C.GB_Total_PRINCIPALES,0)+IFNULL(B.Mean_GB_Extra, 0)-TARIFARIO.GB_Tarifa>5 then 1 else 0 end as flag_5GB_Exceso,
+        CASE WHEN IFNULL(C.GB_Total_PRINCIPALES,0)+IFNULL(B.Mean_GB_Extra, 0)-TARIFARIO.GB_Tarifa>10 then 1 else 0 end as flag_10GB_Exceso,
+        CASE WHEN A.EUR_USAGE>0 then 1 else 0 end as flag_USAGE,
+        CASE WHEN A.EUR_BONO+A.EUR_BONO_DISCOUNT>0 then 1 else 0 end as flag_BONO_PAGADO
+FROM
+    (
+        select 
+              CONCAT(YEAR,'',MONTH) as eop_month_id,
+              brand_ds,
+              customer_id,
+              CUST_BUNDLE,
+              GDPR_Never_Call 
+        from 
+              `bi-data-science-pilots.MASDATA.yoigo_master_table_2020*` 
+        where NUM_LINES_POST_CURR>0
+     ) Tablon
+LEFT JOIN --------------------------------------------------------------------------------------------------------
+(
+    select 
+          ROW_NUMBER() OVER(PARTITION BY brand_ds,data_month_id, account_id,customer_id,LINEA_PRINC_PAQUETE ORDER BY phone_nm DESC) as rn,-- SE ATRIBUYE EL CONSUMO MEDIO DE LAS             LINEAS EXTRAS A UNA TODAS LAS PRINCIPALES QUE TENGA ESE CLIENTE)
+          * 
+    from 
+        (
+            SELECT 
+                  data_month_id,
+                  brand_ds,
+                  account_id, 
+                  customer_id, 
+                  phone_nm,
+                  segment_ds,
+                  tariff_id,
+                  tariff_ds,
+                  sum(USAGE) as EUR_USAGE,
+                  sum(QUOTA) as EUR_QUOTA,
+                  sum(BONO) as EUR_BONO,
+                  sum(BONO_DISCOUNT) as EUR_BONO_DISCOUNT,
+                  MAX(LINEA_PRINC_PAQUETE) as LINEA_PRINC_PAQUETE 
+            FROM
+                (
+                    select 
+                          data_month_id, brand_ds,account_id, customer_id,technology_ds , phone_nm,segment_ds,tariff_id,tariff_ds,
+                          case when billing_concept_type_ds='USAGE' THEN kpi_cost_excl_tax else 0 end as USAGE,
+                          case when billing_concept_type_ds='QUOTA' THEN kpi_cost_excl_tax else 0 end as QUOTA,
+                          case when billing_concept_type_ds='BONO' THEN kpi_cost_excl_tax else 0 end as BONO,
+                          case when billing_concept_type_ds='BONO DISCOUNT' THEN kpi_cost_excl_tax else 0 end as BONO_DISCOUNT,
+                          case when financial_type_ds in ("Bitstream_Principal","FTTH_Principal","ADSL_Principal","POST") AND PRODUCT_TYPE_DS="MOBILE BROADBAND" 
+                          AND line_type_ds="PRINCIPAL" and product_ds="MOVIL" then 1 else 0 end as LINEA_PRINC_PAQUETE
+                     FROM `analitica-bigdata.REPORTING_DETAIL.billing_detail_20*`
+                     where segment_ds <> 'BUSINESS' and billing_type_ds ='POSPAGO' and billing_concept_type_ds IN ('QUOTA','USAGE','BONO','BONO DISCOUNT')
+                )
+            group by data_month_id,brand_ds,account_id,customer_id,phone_nm,segment_ds,tariff_id,tariff_ds
+        )
+) A ON 
+    Tablon.eop_month_id=A.data_month_id and 
+    Tablon.customer_id=A.customer_id and 
+    Tablon.brand_ds=A.brand_ds
+LEFT JOIN ----------------------------------------------------------------------------------------
+(
+      SELECT 
+            1 AS rn,
+            1 AS LINEA_PRINC_PAQUETE, 
+            data_month_id, 
+            brand_ds,
+            customer_id, 
+            segment_ds,
+            avg(GB_Total) as Mean_GB_Extra,
+            count(distinct phone_nm) as Lineas_Extra_Customer 
+       FROM
+        (
+            SELECT 
+                  data_month_id, 
+                  brand_ds, 
+                  customer_id, 
+                  phone_nm,
+                  segment_ds,
+                  tariff_id,
+                  tariff_ds,
+                  SUM(kpi_mb_data)/1024 as GB_Total 
+             FROM
+                (
+                    SELECT 
+                          data_month_id, 
+                          brand_ds,
+                          account_id, 
+                          customer_id,
+                          technology_ds , 
+                          phone_nm,
+                          segment_ds,
+                          tariff_id,
+                          tariff_ds, 
+                          line_type_ds,
+                          kpi_mb_data
+                    FROM 
+                        `analitica-bigdata.REPORTING_DETAIL.billed_traffic_detail_20*` 
+                    where segment_ds <> 'BUSINESS' and billing_type_ds ='POSPAGO' AND tariff_ds="LA LINEA EXTRA"
+                  )
+              GROUP BY data_month_id,brand_ds, customer_id, phone_nm,segment_ds,tariff_id,tariff_ds
+      ) group by data_month_id, brand_ds,customer_id, segment_ds
+) B 
+    on A.data_month_id=B.data_month_id and 
+    A.customer_id=B.customer_id and 
+    A.segment_ds=B.segment_ds and 
+    A.rn=B.rn and 
+    A.LINEA_PRINC_PAQUETE=B.LINEA_PRINC_PAQUETE and A.brand_ds=B.brand_ds
+LEFT JOIN ----------------------------------------------------------------------------------
+(
+      SELECT 
+            data_month_id, 
+            brand_ds, 
+            customer_id, 
+            phone_nm,
+            tariff_id,
+            sum(kpi_mb_data)/1024 as GB_Total_PRINCIPALES
+      FROM 
+          `analitica-bigdata.REPORTING_DETAIL.billed_traffic_detail_20*` 
+      where segment_ds <> 'BUSINESS' and billing_type_ds ='POSPAGO' AND tariff_ds<> "LA LINEA EXTRA"
+      group by data_month_id,brand_ds,customer_id,phone_nm,tariff_id
+) C on 
+A.data_month_id=C.data_month_id and 
+A.customer_id=C.customer_id and 
+A.phone_nm=C.phone_nm and 
+A.tariff_id=C.tariff_id AND 
+A.brand_ds=C.brand_ds
+LEFT JOIN ----------------------------------------------------------------------------------------
+(
+    SELECT 
+          BRAND_DS,
+          CLI_TYPE,
+          TYPE as TARIFF_TYPE,
+          GB_Movil as GB_Tarifa 
+    FROM 
+        `bi-data-science-pilots.DESARROLLO.TARIFARIO_MULTIMARCA`
+) TARIFARIO ON 
+A.tariff_id=TARIFARIO.CLI_TYPE and 
+A.brand_ds=TARIFARIO.brand_ds;
+
+
+
+
+/*
+      Paso 2: Este código se encarga de calcular a nivel cliente cuantas líneas han tenido exceso de consumo, líneas con poco uso, 
+      número de líneas con bono pero que no han consumido el total. 
+
+*/
+
+
+DROP TABLE IF EXISTS `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.CONSUMO_NIVEL_CLIENTE`;
+ 
+ create table `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.CONSUMO_NIVEL_CLIENTE` AS 
+ select
+      EOP_MONTH_ID,
+      CUSTOMER_ID,
+      SUM(COALESCE((GB_TOTAL) / NULLIF(GB_TARIFA,0), 0)) as PERC_GB_CLIENTE,
+      SUM(CASE WHEN GB_EXCESO>0 then 1 else 0 end)as NUM_LINEAS_EXCESO,
+      SUM(GB_EXCESO) AS GB_EXCESO,
+      SUM(CASE WHEN PERC_GB>1 then 1 else 0 end) as Lineas_Exceso,
+      SUM(CASE WHEN PERC_GB<0.25 AND GB_TARIFA<>1000 and GB_TOTAL>0 AND GB_TARIFA>0 then 1 else 0 end) as Lineas_Poco_Uso,
+      AVG(PERC_GB) as AVG_PERC_GB,
+      SUM(GB_TOTAL) AS GB_TOTAL,
+      SUM(CASE WHEN PERC_GB<0.9 then 1 else 0 end ) as Lineas_Con_Consumo_Pdte,
+      SUM(CASE WHEN flag_BONO_PAGADO=1 AND PERC_GB<0.9 THEN 1 ELSE 0 END) Lineas_Con_Bono_Sin_Uso
+ from ( 
+       select 
+           EOP_MONTH_ID,
+           CUSTOMER_ID,
+           PHONE_NM,
+           COALESCE((GB_TOTAL) / NULLIF(GB_TARIFA,0), 0) as PERC_GB,
+           GB_TOTAL,
+           GB_TARIFA,
+           GB_Exceso,
+           flag_BONO_PAGADO
+       from 
+          `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.CONSUMO_POR_LINEA`
+       WHERE SUBSTR(PHONE_NM,1,1) IN ('6','7')     
+      ) a
+GROUP BY
+    EOP_MONTH_ID,
+    CUSTOMER_ID;
+    
+      
+      DROP TABLE IF EXISTS  `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.EXCESO_CONSUMO`;
+      
+      CREATE TABLE `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.EXCESO_CONSUMO` AS
+      SELECT 
+          CUSTOMER_ID,
+          Lineas_Exceso,
+          Lineas_Poco_Uso,
+          Lineas_Con_Consumo_Pdte,
+          Lineas_Con_Bono_Sin_Uso,
+          GB_TOTAL
+      FROM 
+            `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.CONSUMO_NIVEL_CLIENTE`
+      WHERE EOP_MONTH_ID=MONTH_ID_ST;
+
+
+ 
+ /***********************************************
+ *
+ *   INFORMACION DE DESCUENTOS
+ *
+ ***********************************************/
+ 
+     DROP TABLE  IF EXISTS `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.DESCUENTOS_RESIDENCIAL_2`;
+     
+     CREATE TABLE `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.DESCUENTOS_RESIDENCIAL_2` AS
+        SELECT
+                A.*,
+                B.DISCOUNT_VALUE,
+                B.UNIT,
+                B.INIT_DATE,
+                B.END_DATE,
+                CASE WHEN CAST(END_DATE AS DATE)>=CAST(VAR_FIRST_DATE_PRED_MONTH_ST AS DATE) AND END_DATE<=CAST(VAR_LAST_DATE_PRED_MONTH_ST AS DATE) THEN 1 ELSE 0 END AS FIN_DTO 
+            FROM(
+                   SELECT
+                        DISTINCT 
+                        A.CUSTOMER_ID,
+                        A.SERVICE_ID,
+                        A.PHONE_NM
+                   FROM 
+                        `mm-datamart-kd.SERVICES.service_base_net` A
+                   WHERE BRAND_DS='YOIGO' AND (DEACTIVATION_DATE IS NULL OR CAST(DEACTIVATION_DATE AS DATE) > VAR_LAST_DAY_DATE_CURR_MONTH_DT)
+                   AND SEGMENT_DS='RESIDENCIAL'
+                  ) A
+           INNER JOIN
+                (
+                   SELECT
+                        MONTH_ID,
+                        A.SERVICE_ID,
+                        A.PHONE_NM,
+                        A.DISCOUNT_VALUE,
+                        A.UNIT,
+                        A.INIT_DATE,
+                        A.END_DATE,
+                        DATE_DIFF(END_DATE,INIT_DATE,DAY) AS DURACION
+                   FROM
+                        `mm-datamart-kd.SERVICES.discount_base_qvantel` a
+                    where
+                     REGEXP_CONTAINS(bill_code,'HM$') <> TRUE
+                    AND REGEXP_CONTAINS(bill_code,'H$') <> TRUE
+                    AND REGEXP_CONTAINS (bill_code,'BONO') <> TRUE
+                    AND bill_code NOT IN ('DISCINCIDENCIASRED') AND
+                    INIT_DATE<=VAR_LAST_DAY_DATE_CURR_MONTH_DT AND
+                    END_DATE>=VAR_LAST_DAY_DATE_CURR_MONTH_DT AND
+                    DISCOUNT_GROUP LIKE '%DESCUENTO COMERCIAL%'
+                 ) B
+             ON A.SERVICE_ID=B.SERVICE_ID;
+             
+         
+
+          
+/************************************************************************************
+  *
+  * Información de jiras amarillos
+  *
+************************************************************************************/
+
+             DROP TABLE IF EXISTS  `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.JIRAS_AMARILLOS`;
+             
+             create table `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.JIRAS_AMARILLOS` as
+             select 
+                 format_date('%Y%m',date(created_ts)) as eop,
+                 brand_ds,
+                 customer_id,
+                 count(distinct id) as jiras,
+                 sum(case when 
+                        (priority like '%High%' or priority like '%Highest%' ) and  coalesce ( is_solved_first_contact , 'NO' ) = 'NO'
+                            and issuestatus <> 'Descartado'
+                        then 1 else 0 end) as Jiras_Alta_Prioridad,
+                 sum(case when (issuetype like '%Avería (FTTH)%' or issuetype like '%Avería (xDSL)%' ) and  coalesce ( is_solved_first_contact , 'NO' ) = 'NO' then 1 else 0 end) as Jiras_Averia_Fijo,
+                 sum(case when (issuetype like '%Reclamación Instalación xDSL%' or issuetype like '%Reclamación Instalación FTTH%' ) and  coalesce ( is_solved_first_contact , 'NO' ) = 'NO' then 1 else 0 end) as Jiras_Reclamacion_Fijo,
+                 sum(case when 
+                              (issuetype like '%Avería (FTTH)%' or issuetype like '%Avería (xDSL)%')
+                            and ( coalesce ( is_massive , 'NO' ) = 'YES' or ref_idr is not null)
+                            and coalesce ( is_solved_first_contact , 'NO' ) = 'NO'
+                            and issuestatus <> 'Descartado'
+                     then 1 else 0 end) as Jiras_Averia_Masiva,
+                  sum(case when (issuetype like '%Reclamación Instalación xDSL%' or issuetype like '%Reclamación Instalación FTTH%' ) and  coalesce ( is_solved_first_contact , 'NO' ) = 'NO'  then TIMESTAMP_DIFF(resolution_ts, created_ts, hour) else 0 end ) as horas_resolucion_reclamacion,
+                  sum(case when (issuetype like '%Avería (FTTH)%' or issuetype like '%Avería (xDSL)%' ) and  coalesce ( is_solved_first_contact , 'NO' ) = 'NO'  then TIMESTAMP_DIFF(resolution_ts, created_ts, hour) else 0 end )
+                  as horas_resolucion_averia 
+             from
+                   `mm-datamart-kd.TICKETING.jira_am_base_ticketing`
+             where billing_type_ds='POSTPAID' and created_ts > "2018-12-31 23:59:59"
+             group by
+                format_date('%Y%m',date(created_ts)),
+                brand_ds,
+                customer_id;
+                
+  /****************************************************************************
+     
+     Tickets de provision
+     
+  *******************************************************************************/
+
+                DROP TABLE IF EXISTS  `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.EARLY_LIFE_TICKETS`;
+                
+                create table `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.EARLY_LIFE_TICKETS` AS
+                SELECT
+                format_date('%Y%m',date(created_ts)) as eop,
+                count(distinct a.workorderid) as early_life_tickets,
+                a.customer_id,
+                a.brand_ds
+                FROM  
+                    `mm-datamart-kd.TICKETING.jira_am_base_ticketing`  a
+                inner join 
+                    ( 
+                        SELECT 
+                            workorder_id as workorderid,
+                            date(workorder_created_date) dia_cerrada_minima
+                        FROM 
+                            `mm-datamart-kd.ACCESS_PROVISION.provision_base`
+                        WHERE workorder_created_date >= "2019-01-01 00:00:00" AND workorder_type_ds IN ("Alta FTTH + VOIP", "Alta FTTH Naked", "Alta FTTH NEBA + VOIP", "Alta FTTH NEBA Naked", "Alta FTTH VULA + VOIP", "Alta FTTH VULA Naked")
+                    )b on a.workorderid = b.workorderid
+                where date_trunc(date(created_ts), month) >= '2019-01-01'
+                and coalesce ( is_massive , 'NO' ) = 'NO'
+                and coalesce ( is_solved_first_contact , 'NO' ) = 'NO'
+                and issuetype = 'Avería (FTTH)'
+                and ref_idr is null
+                and date_diff (date(created_ts) , dia_cerrada_minima , day ) <= 30 
+                group by 1,3,4;
+    
+    
+    
+    
+    /*
+        INFORMACION DE BLUE TICKETS
+    */
+   
+   
+     DROP TABLE IF EXISTS `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.BLUE_TICKETS`;
+  
+  CREATE TABLE `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.BLUE_TICKETS` AS
+  SELECT
+      CUSTOMER_ID,
+      BRAND_DS,
+      EOP_MONTH,
+      CASE
+          WHEN LAST_TIPO_TIPOLOGIA_TICKET LIKE '%Reclamación_Desacuerdo con cargos%' THEN 'RECLAMACION_DESACUERDOS'
+          WHEN LAST_TIPO_TIPOLOGIA_TICKET LIKE '%Incidencia_MMS%' THEN 'INCIDENCIA_SMS'
+          ELSE LAST_TIPO_TIPOLOGIA_TICKET
+      END AS LAST_TIPO_TIPOLOGIA_TICKET,
+      CASE
+          WHEN LAST_TIPO_TIPOLOGIA_TICKET LIKE '%Incidencia_Televisión%' THEN 'Network'    
+          WHEN LAST_TIPO_TIPOLOGIA_TICKET LIKE '%Incidencia_Migración de red%' THEN 'Network'
+          WHEN LAST_TIPO_TIPOLOGIA_TICKET LIKE '%Reclamación_Sim Unlock%' THEN 'Process'
+          WHEN LAST_TIPO_TIPOLOGIA_TICKET LIKE '%Incidencia_Otros%' THEN 'Process'
+          WHEN LAST_TIPO_TIPOLOGIA_TICKET LIKE '%Reclamación_Fusión%' THEN 'Process'
+          WHEN LAST_TIPO_TIPOLOGIA_TICKET LIKE '%Incidencia_Suscripci&amp;#243;n%' THEN 'Process'
+          ELSE NULL
+      END AS AGRUPACION_BLUE_TICKET,      
+      NUM_TICKETS_CUSTOMER
+  FROM(
+  select
+      distinct
+       customer_id,
+       brand_ds,
+       eop_month,
+       FIRST_VALUE(tipo_tipologia_ticket) over (partition by eop_month,customer_id, brand_ds order by created_ts desc) as last_tipo_tipologia_ticket,
+       count(distinct num_ticket) over (partition by eop_month,customer_id, brand_ds) as Num_Tickets_Customer
+  from (
+            select 
+                customer_id,
+                brand_ds,
+                created_ts,
+                parse_date('%Y-%m-%d',substr(cast(created_ts as string),1,10)) as fecha_jira,
+                substr(cast(created_ts as string),1,4)||substr(cast(created_ts as string),6,2)  as eop_month,
+                concat(ticket_type, "_", case when tipology in ('INCIDENCIA â€“ TELEVISION â€“ PROBLEMAS TV' ) then "INCIDENCIA_TV" else tipology end) as tipo_tipologia_ticket,
+                id as num_ticket
+            from `mm-datamart-kd.TICKETING.jira_cc_base_ticketing`
+            where
+                ticket_type not in ('TAREA','Tarea')
+              and input_channel not in ('Llamada emisión')
+              and tipology not in ( 'BAJA','Baja','Cancelación')
+        ) a
+  )A;
+  
+  
+    /*
+            Paso 5: 
+            Calculamos el número de tickets azules que tiene cada cliente en cada mes. Los tickets se clasifican en:
+            - Network
+            - Heavy Callers
+            - Process
+            Para clasificar como es cada ticket, se utiliza la tabla: 
+            `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.BLUE_TICKETS_DICTIONARY
+            Esta tabla es un dicccionario desarrollado por Mckinsey.
+        */
+  
+  DROP TABLE IF EXISTS `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.MONTHLY_BLUE_TICKETS`;
+        
+        
+        CREATE TABLE `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.MONTHLY_BLUE_TICKETS` AS
+        SELECT
+            CUSTOMER_ID,
+            BRAND_DS,
+            MONTH_ID_ST as EOP_MONTH,
+            TICKETS_NETWORK,
+            TICKETS_PROCESS,
+            TICKETS_HEAVY_CALLERS,
+            CASE  
+                WHEN TICKETS_NETWORK>=TICKETS_PROCESS AND TICKETS_NETWORK>=TICKETS_HEAVY_CALLERS AND TICKETS_NETWORK>0 THEN 'NETWORK'
+                WHEN TICKETS_HEAVY_CALLERS>=TICKETS_PROCESS AND TICKETS_HEAVY_CALLERS>TICKETS_NETWORK AND TICKETS_HEAVY_CALLERS>0 THEN 'HEAVY CALLERS'
+                WHEN TICKETS_PROCESS>TICKETS_HEAVY_CALLERS AND TICKETS_PROCESS>TICKETS_NETWORK AND TICKETS_PROCESS>0 THEN 'PROCESS'
+                ELSE NULL
+            END AS SEGMENTO_BLUE_TICKETS,
+            TOTAL_BLUE_TICKETS
+        FROM 
+        (
+            SELECT
+                CUSTOMER_ID,
+                BRAND_DS,
+                SUM(CASE
+                    WHEN TIPO_BLUE_TICKET LIKE '%Network%' THEN Num_Tickets_Customer ELSE 0 END) AS TICKETS_NETWORK,
+                SUM(CASE
+                    WHEN TIPO_BLUE_TICKET LIKE '%Process%' THEN Num_Tickets_Customer ELSE 0 END) AS TICKETS_PROCESS,
+                SUM(CASE
+                    WHEN TIPO_BLUE_TICKET LIKE '%Heavy callers%' THEN Num_Tickets_Customer ELSE 0 END) AS TICKETS_HEAVY_CALLERS,
+                SUM(Num_Tickets_Customer ) AS TOTAL_BLUE_TICKETS   
+            FROM ( 
+                  SELECT
+                    A.*,
+                    CASE
+                      WHEN A.AGRUPACION_BLUE_TICKET IS NULL THEN B.string_field_2 ELSE AGRUPACION_BLUE_TICKET END AS TIPO_BLUE_TICKET
+                  FROM  
+                      `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.BLUE_TICKETS` A
+                  LEFT JOIN
+                      `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.BLUE_TICKETS_DICTIONARY` B
+                  ON UPPER(replace(A.last_tipo_tipologia_ticket,'ó','o')) = B.string_field_0
+              ) A
+              WHERE EOP_MONTH IN(MONTH_ID_ST,MONTH_ID_ST_M1)
+              GROUP BY
+                  CUSTOMER_ID, BRAND_DS
+           ) A;
+   
+   
+     DROP TABLE IF EXISTS  `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.MONTHLY_BLUE_TICKETS_V2`;
+      
+      CREATE TABLE `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.MONTHLY_BLUE_TICKETS_V2` AS
+      SELECT 
+          CUSTOMER_ID,
+          TICKETS_NETWORK,
+          TICKETS_PROCESS,
+          TICKETS_HEAVY_CALLERS,
+          TOTAL_BLUE_TICKETS ,
+          SEGMENTO_BLUE_TICKETS
+      FROM `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.MONTHLY_BLUE_TICKETS`
+      WHERE EOP_MONTH=MONTH_ID_ST AND BRAND_DS='YOIGO';
+    

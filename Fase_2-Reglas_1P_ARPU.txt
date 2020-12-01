@@ -1,0 +1,447 @@
+
+#create table bi-data-science-pilots.DESARROLLO.Segemtacion_1P_202006_ALL_DECIL_ARPU as 
+create table bi-data-science-pilots.DESARROLLO.000_ajuste_18_202006_new_6_arpu  as  #000_ajuste_18_202006 as 
+
+
+with
+
+jiras_cc_acum as (
+        select 
+            customer_id , eop_month,
+            tiempo_resolucion_incidencia , 
+            tiempo_resolucion_reclamacion ,
+            Incidencias_High_Priority,
+            Jiras_Reclamacion_Movil,
+            Mobile_Red_Incidences,
+            count(customer_id) as total_jiras_cc            
+        FROM  `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.RECLAMACIONES_BLUE_JIRA`  # `mm-datamart-kd.TICKETING.jira_cc_base_ticketing` 
+        WHERE 
+            eop_month = '202006'  and BRAND_DS='YOIGO'
+        group by   
+            customer_id , eop_month,
+            tiempo_resolucion_incidencia , tiempo_resolucion_reclamacion ,
+            Incidencias_High_Priority,
+            Jiras_Reclamacion_Movil,
+            Mobile_Red_Incidences) ,
+           
+# # pasos 2
+# # ====================================================
+TABLON_1P as (SELECT 
+            a.*,
+            b.tiempo_resolucion_incidencia,
+            b.tiempo_resolucion_reclamacion,
+            b.Incidencias_High_Priority,
+            b.total_jiras_cc,
+            b.Jiras_Reclamacion_Movil,
+            b.Mobile_Red_Incidences     
+      FROM   
+            `bi-data-science-pilots.MASDATA.brand_yoigo_monthly_board_20200630` as a left join 
+            jiras_cc_acum  AS B
+           
+      on  a.CUSTOMER_ID=b.customer_id     
+      WHERE 
+          a.IS_CUST_BUND_MO_CURR is true and  IS_CUST_BUND_FMC_CURR is false
+      and
+        (a.GDPR_NEVER_CALL = 0 or a.GDPR_NEVER_CALL is null) and
+        a.BRAND_DS = 'YOIGO' and a.NUM_SEGM_RESI_POST_CURR > 0 and 
+        a.NUM_LINES_POST_CURR > 0),
+
+        
+# # pasos 3 
+# # ====================================================
+TABLON_1P_SEG as (     
+        SELECT  a.*, 
+            b.Bundle_Type, b.Fecha_Predicion ,b.Modelo,b.Decil,b.Percentil,b.Propension,b.VERSION  
+          ,  c.Target as fuga_real 
+        from    
+            TABLON_1P  as a 
+        left join
+            `bi-data-science-pilots.SCORING_MODELOS.SCORING_MODELOS_NBA` as b 
+
+        on a.Customer_Id=b.Customer_Id
+        LEFT JOIN 
+          `bi-data-science-pilots.EVALUACION_MODELOS.EVALUACION_MODELOS_NBA` AS c
+         on a.Customer_Id  = CAST(c.Customer_Id as string)
+        WHERE          
+        a.IS_CUST_BUND_MO_CURR = True and a.IS_CUST_BUND_FMC_CURR = False and
+        (a.GDPR_NEVER_CALL = 0 or a.GDPR_NEVER_CALL is null) and
+        a.BRAND_DS = 'YOIGO' and a.NUM_SEGM_RESI_POST_CURR > 0 and 
+        a.NUM_LINES_POST_CURR > 0 and 
+        b.Mes_Datos='202006'  and  
+        b.Brand_ds='YOIGO' and b.Bundle_Type ='1P' and 
+        b.Segmento='RESIDENCIAL' and b.Mes_Datos='202006'  and 
+        b.modelo='CHURN' and b.VERSION='2' 
+         and 
+        #  b.decil<3 and
+         c.BRAND_DS = 'YOIGO' and c.Segmento='RESIDENCIAL' and 
+         c.Bundle_Type='1P' and c.Modelo='CHURN' and 
+         c.Mes_Datos='202006'  and c.VERSION='3'
+    ),
+ 
+ 
+ 
+# # pasos 4 
+# # ====================================================
+TABLON_1P_SEG_Comp AS (
+        select a.*, b.ISSUE_CALL
+        FROM TABLON_1P_SEG  AS  a left join  
+        (SELECT  distinct 
+                customer_id, count(ISSUE_CALL) as ISSUE_CALL
+        FROM `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.ISSUE_CALLS_2` # USAR ESTA TABLA DE MARIAN 
+        where EOP_MONTH='202006' and BRAND='YOIGO'
+        group by customer_id) as b 
+        on a.CUSTOMER_ID=b.customer_id ),
+        
+
+# # pasos 5
+# # ====================================================
+TABLON_1P_SEG_Comp_dos AS (
+     SELECT a.*,
+     b.GB_EXCESO,
+     b.Lineas_Exceso, 
+     b.Lineas_Poco_Uso,
+     #b.Lineas_Con_Consumo_Pdte,
+     #b.Lineas_Con_Bono_Sin_Uso
+     FROM TABLON_1P_SEG_Comp as a left join   
+     `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.CONSUMO_NIVEL_CLIENTE`  as b
+     on  a.CUSTOMER_ID=b.CUSTOMER_ID
+     WHERE B.EOP_MONTH_ID='202006') ,           
+
+
+# # paso 6  
+# # ==========================   
+TABLON_1P_SEG_Comp_TRES_1 AS (            
+      SELECT A.* ,B.total_telefonos,  
+      B.DISCOUNT_VALUE_eur,
+      B.FIN_DTO 
+      FROM TABLON_1P_SEG_Comp_dos 
+      
+      AS A
+      LEFT JOIN (
+      SELECT CUSTOMER_ID ,
+      count(PHONE_NM) as total_telefonos,  
+      sum(DISCOUNT_VALUE) as DISCOUNT_VALUE_eur,
+      sum(FIN_DTO) as FIN_DTO
+      FROM `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.DESCUENTOS_RESIDENCIAL_2`  # usar tabla de marian 
+      group by CUSTOMER_ID) AS B
+      ON A.CUSTOMER_ID=B.CUSTOMER_ID  
+),
+
+# # paso 7 util para heavy callers  
+# # ==========================  
+TABLON_1P_SEG_Comp_TRES as  (
+     select distinct  a.* ,b.NUM_TOTA_WAIT_MORE_5MIN, b.NUM_RECA ,	b.rellamada,	b.TIEMPO_MEDIO_ESPERA	  from 
+
+TABLON_1P_SEG_Comp_TRES_1 as a left join 
+(select * from `bi-data-science-pilots.SEGMENTACION_CHURN_YOIGO.LLAMADAS_ATC_MENSUAL`  WHERE EOP= '202006') as b
+
+ on a.CUSTOMER_ID =b.CUSTOMER_ID
+),
+
+
+# # paso 8 Generacion de variables
+# # ==========================  
+TABLON_1P_SEG_NEW_VAR AS (select 
+          *,
+ 
+        #CASE WHEN Lineas_Con_Consumo_Pdte >= 2  or  Lineas_Exceso >= 1  or  Lineas_Con_Bono_Sin_Uso >= 1  THEN 1 ELSE 0 END AS LINEAS_TARIFA_ERRONEA,
+        CASE WHEN NUM_LINE_THR_QOE_MOBI  >1 or  MOBILE_INCIDENCES  > 1 or AVG_THR_QOE_MOBI <=0.5 or  AVG_DL_PEAK_THR_KBPS_MOBI <=1381.39  or AVG_KPI_PERC_CSS_MOBI <=54.23 THEN 1 ELSE 0 END AS PROBLEMAS_TECNICOS,        
+        CASE WHEN TICKETS_NETWORK  >= 2 or  Mobile_Red_Incidences  >= 1 THEN 1 ELSE 0 END AS TICKETS_RED,        
+        CASE WHEN NUM_THR_QOE_MOBI_1  > 1 or  NUM_THR_QOE_MOBI_2  > 1 OR IS_DETERIORED_3M_AVG_KPI_QOE_MOBI  =1 OR DELTA_MOBILE_INCIDENCES_3M_MONTH =1 THEN  1 ELSE 0 END AS low_signal ,        
+        (NUM_FRIENDS_BRAND_UNKN + NUM_FRIENDS_BRAND_TME  + NUM_FRIENDS_BRAND_VOD + NUM_FRIENDS_BRAND_OSP  +  NUM_FRIENDS_BRAND_DIG) AS  Amigos_competencia
+                    
+        from TABLON_1P_SEG_Comp_TRES ) ,
+        
+        
+   
+        
+
+# # paso 8.1 NUEVO Se añade variacion y facturacion NUEVO
+# # ==========================  
+parte_1 as( select distinct *
+            from (
+            SELECT CUSTOMER_ID as cli,
+            AVG(ROUNd(Fact_Total_Wotax,2)) AS FACTURACION_MEDIA, 
+            COUNT(DISTINCT EOP) AS MESES,
+            AVG(ROUND(ifnull(Fact_BONO_discount,0)+ifnull(Fact_LOYALTY_discount,0)+
+            ifnull(Fact_other,0)+ifnull(Fact_QUOTA,0)+ifnull(Fact_QUOTA_discount,0)+
+            ifnull(Fact_USAGE,0)+ifnull(Fact_XSELL_DISCOUNT,0),2)) AS FACTURACION_MEDIA_USO,
+            sum(claims) as claims_3M,
+            sum(BILLING_CLAIMS) as billings_3M,
+            sum(MOBILE_INCIDENCES) as movil_incdn_3M   # "claims, billings, movil_incdn"           
+            
+          fROM `bi-data-science-pilots.MASDATA.brand_yoigo_monthly_board_2020*`
+            WHERE EOP IN ('202003','202004','202005') and Fact_Total_Wotax is not null  # MONTH_ID_ST_M1,MONTH_ID_ST_M2,MONTH_ID_ST_M3
+            GROUP BY CUSTOMER_ID
+            ) where meses=3
+            ), 
+            
+parte_1_bis as (select distinct CUSTOMER_ID,
+            ROUND(ifnull(A.Fact_BONO_discount,0)+
+            ifnull(A.Fact_LOYALTY_discount,0)+
+            ifnull(A.Fact_other,0)+
+            ifnull(A.Fact_QUOTA,0)+
+            ifnull(A.Fact_QUOTA_discount,0)+
+            ifnull(A.Fact_USAGE,0)+
+            ifnull(A.Fact_XSELL_DISCOUNT,0),2)  AS FACTURACION_USO            
+
+
+## ojo cambiar aki··
+##### ojo cambiar 
+##### ojo cambiar 
+##### ojo cambiar 
+            fROM `bi-data-science-pilots.MASDATA.brand_yoigo_monthly_board_20200630` as a
+),
+           
+parte_1_tot as (select a.*,b.FACTURACION_USO 
+                  from parte_1 as a left join parte_1_bis as b 
+                  on a.cli=b.CUSTOMER_ID) ,
+
+
+parte_1_jo as (select distinct a.*,b.FACTURACION_MEDIA, b.FACTURACION_MEDIA_USO, b.FACTURACION_USO	 from
+               TABLON_1P_SEG_NEW_VAR AS A  # 'bi-data-science-pilots.DESARROLLO.Segemtacion_1P_202006' as a   
+                left join parte_1_tot  as b   
+                on a.CUSTOMER_ID =cast(b.cli as string)),  
+                               #parte_1
+                
+parte_2 as ( select distinct *,
+       CASE WHEN FACTURACION_MEDIA_USO>0 THEN (FACTURACION_USO-FACTURACION_MEDIA_USO)/FACTURACION_MEDIA_USO ELSE 99999 END AS INCR_PORCENTUAL_USO,
+           (FACTURACION_USO-FACTURACION_MEDIA_USO) AS VARIACION_ABSOLUTA_USO from parte_1_jo
+           ),
+ 
+ 
+# meter left join desposicionamiento 
+
+-- desposicionamiento as
+--           ( select distinct a.*, b.IS_CUST_DEPO, b.AVG_SAVINGS, b.MAX_SAVINGS, b.MAX_PERC_SAVINGS, b.AVG_PERC_SAVINGS, b.NUM_TARIFF_PROP
+--           from parte_2 a
+--           left join
+--           `bi-data-science-pilots.DEVELOPMENT.monthly_customer_recommendation_aggr_20200831`b
+--           on a.customer_id=b.customer_id),
+
+
+# # paso 8 Generacion de segmentos
+# # ==========================  
+TABLON_1P_SEGMENTOS AS (select 
+          *,
+        # # SEG_proceso (issue)
+        # # ========================  
+        CASE WHEN 
+        
+        ifnull(NUM_LLAMADAS_PROCESS,0) > 0 OR  
+        ifnull(CLAIMS,0) > 0  or 
+        ifnull(BILLING_CLAIMS,0) >0 OR 
+        ifnull(ISSUE_CALL,0)>0  
+--         # new
+         or ifnull(MOBILE_INCIDENCES,0) > 0 or 
+         ifnull(Mobile_Red_Incidences,0) >0
+--         # fin de new
+        
+        #or  Incidencias_High_Priority > 0 
+        THEN 1 ELSE 0 END AS SEG_proceso  ,        
+        
+        # # SEG_Calidad
+
+        # # ========================  
+        CASE WHEN 
+              
+                
+--      ajuste 18
+        ifnull(AVG_THR_QOE_MOBI,0) <= 2 AND   ifnull(NUM_MONTH_BAD_THR_QOE_MOBI_6M,0) >= 5 
+        
+        
+--      ajuste 17
+--         (ifnull(IS_DETERIORED_1M_AVG_THR_QOE_MOBI,0) > 0  OR  ifnull(AVG_THR_QOE_MOBI,0) <= 2) OR 
+
+--         ( ifnull(AVG_THR_QOE_MOBI,0) <= 2  OR  ifnull(NUM_MONTH_BAD_THR_QOE_MOBI_6M,0) >= 5 ) 
+
+--      ajuste 16
+        #(ifnull(IS_DETERIORED_1M_AVG_THR_QOE_MOBI,0) > 0  AND   ifnull(AVG_THR_QOE_MOBI,0) <= 2) OR 
+
+        #( ifnull(AVG_THR_QOE_MOBI,0) <= 2  AND  ifnull(NUM_MONTH_BAD_THR_QOE_MOBI_6M,0) >= 5 ) 
+
+
+--      ajuste 15
+
+#        ( ifnull(AVG_THR_QOE_MOBI,0) <= 2  and  ifnull(NUM_MONTH_BAD_THR_QOE_MOBI_6M,0) >= 5 ) or  ifnull(IS_DETERIORED_1M_AVG_THR_QOE_MOBI,0) > 0
+         
+         
+--      ajuste 13
+
+#         ifnull(AVG_THR_QOE_MOBI,0) <= 3  and ifnull(NUM_MONTH_BAD_THR_QOE_MOBI_6M,0) > 0 or  ifnull(IS_DETERIORED_1M_AVG_THR_QOE_MOBI,0) > 0 
+
+
+-- --      ajuste 12
+--         ifnull(IS_DETERIORED_1M_AVG_THR_QOE_MOBI,0) > 0 or        
+--         (ifnull(IS_DETERIORED_1M_AVG_THR_QOE_MOBI,0) = 0  and  ifnull(NUM_MONTH_BAD_THR_QOE_MOBI_6M,0) > 0)  or 
+--          ifnull(AVG_THR_QOE_MOBI,0) <= 3  and ifnull(NUM_MONTH_BAD_THR_QOE_MOBI_6M,0) > 0  
+        
+
+--      ajuste 9
+--         ifnull(IS_DETERIORED_1M_AVG_THR_QOE_MOBI,0) > 0  and  ifnull(AVG_THR_QOE_MOBI,0) <= 3.5  or
+--         (ifnull(IS_DETERIORED_1M_AVG_THR_QOE_MOBI,0) = 0  and  ifnull(NUM_MONTH_BAD_THR_QOE_MOBI_6M,0) >0) or
+--         (ifnull(IS_DETERIORED_1M_AVG_THR_QOE_MOBI,0) = 0  and  ifnull(NUM_MONTH_BAD_THR_QOE_MOBI_6M,0) = 0 and ifnull(AVG_THR_QOE_MOBI,0) <= 3.5 ) 
+
+
+--      ajuste 8
+--        ifnull(IS_DETERIORED_1M_AVG_THR_QOE_MOBI,0) > 0  and  ifnull(AVG_THR_QOE_MOBI,0) <= 3.5 
+--        or  (ifnull(IS_DETERIORED_1M_AVG_THR_QOE_MOBI,0) = 0  and  ifnull(NUM_MONTH_BAD_THR_QOE_MOBI_6M,0) > 0 and ifnull(AVG_THR_QOE_MOBI,0) <= 3 ) 
+
+
+--      ajuste 7
+--         ifnull(IS_DETERIORED_1M_AVG_THR_QOE_MOBI,0) > 0  and  ifnull(AVG_THR_QOE_MOBI,0) <= 3.5 
+--        or  (ifnull(IS_DETERIORED_1M_AVG_THR_QOE_MOBI,0) = 0  and  ifnull(NUM_MONTH_BAD_THR_QOE_MOBI_6M,0) > 0) 
+
+--      ajuste 6
+--         ifnull(IS_DETERIORED_1M_AVG_THR_QOE_MOBI,0) > 0 
+--        or  (ifnull(IS_DETERIORED_1M_AVG_THR_QOE_MOBI,0) = 0  and  ifnull(NUM_MONTH_BAD_THR_QOE_MOBI_6M,0) > 0) 
+        
+--      ajuste 5
+--         ifnull(IS_DETERIORED_1M_AVG_THR_QOE_MOBI,0) > 0 or 
+--         (ifnull(IS_DETERIORED_1M_AVG_THR_QOE_MOBI,0) = 0  and  ifnull(NUM_MONTH_BAD_THR_QOE_MOBI_6M,0) > 0)  or 
+--         (ifnull(IS_DETERIORED_1M_AVG_THR_QOE_MOBI,0) = 0  and  ifnull(NUM_MONTH_BAD_THR_QOE_MOBI_6M,0) = 0   and  ifnull(AVG_THR_QOE_MOBI,0) <=4)     
+        
+
+--      ajuste 4
+--         ifnull(AVG_THR_QOE_MOBI,0) <=4  and  ifnull(NUM_MONTH_BAD_THR_QOE_MOBI_6M,0) > 0 or
+--         ifnull(IS_DETERIORED_1M_AVG_THR_QOE_MOBI,0) >0  and  ifnull(NUM_LLAMADAS_NETWORK,0) > 0 or
+--         Mobile_Red_Incidences>0 
+         
+        
+--          ajuste 3
+--         ifnull(AVG_THR_QOE_MOBI,0) <=4  and  ifnull(NUM_MONTH_BAD_THR_QOE_MOBI_6M,0) > 0 or
+--          ifnull(IS_DETERIORED_1M_AVG_THR_QOE_MOBI,0) >0  and  ifnull(NUM_LLAMADAS_NETWORK,0) > 0 
+        
+--        
+--         Mobile_Red_Incidences>0  
+
+--         ajuste 2
+--         ifnull(NUM_MONTH_BAD_THR_QOE_MOBI_6M,0) > 0 AND         ifnull(NUM_LLAMADAS_NETWORK,0) > 0 and 
+--         ifnull(AVG_THR_QOE_MOBI,0) <=2.5 OR 
+--         ifnull(IS_DETERIORED_1M_AVG_THR_QOE_MOBI,0) >0  OR 
+--         Mobile_Red_Incidences>0  
+        
+--         Ajuste 1        
+--         ifnull(NUM_MONTH_BAD_THR_QOE_MOBI_6M,0) > 0 AND         ifnull(NUM_LLAMADAS_NETWORK,0) > 0 or 
+--         ifnull(AVG_THR_QOE_MOBI,0) <=2.5 OR 
+--         ifnull(IS_DETERIORED_1M_AVG_THR_QOE_MOBI,0) >0  OR 
+--         Mobile_Red_Incidences>0  
+        
+        
+        
+--         ifnull(NUM_MONTH_BAD_THR_QOE_MOBI_6M,0) > 0 or
+--         ifnull(AVG_THR_QOE_MOBI,0) <=2.5 OR 
+--         ifnull(NUM_LLAMADAS_NETWORK,0) > 0 OR 
+--         ifnull(IS_DETERIORED_1M_AVG_THR_QOE_MOBI,0) >0  OR 
+--         Mobile_Red_Incidences>0             
+        
+        
+        # Mirar
+        THEN 1 ELSE 0 END AS  SEG_Calidad,          
+        
+        # # SEG_Heavy_Callers
+        # # ========================
+        CASE WHEN 
+        # ifnull(TIEMPO_MEDIO_ESPERA,0) > 6  OR  ifnull(rellamada,0) >=1  THEN 1 ELSE 0 END AS  SEG_Heavy_Callers,
+        ifnull(TIEMPO_MEDIO_ESPERA,0) > 6  OR  ifnull(rellamada,0) >=1  THEN 1 ELSE 0 END AS  SEG_Heavy_Callers,
+
+        # # SEG_Wrong_Tariff
+        # # ========================
+        CASE WHEN 
+# opcion 2
+         (ifnull(Lineas_Con_Bono_Sin_Uso,0) >0 and ifnull(FLAG_useless_line,0) >= 2 ) OR  
+         #(ifnull(Lineas_Exceso,0) > 0 and ifnull(NUM_LLAMADAS_WRONG_TARIFF,0) > 0 ) OR  
+         
+         ifnull(NUM_LLAMADAS_WRONG_TARIFF,0) > 0 OR  
+         ifnull(NUM_DISC_NEXT_2_MONTHS_DEAC,0) >=1 OR 
+         ifnull(NUM_DISC_NEXT_MONTH_DEAC,0) >=1 or 
+         ifnull(Lineas_Poco_Uso,0) >=1
+      # or ifnull(AVG_SAVINGS,0) >=5
+         
+         ## GB_EXCESO
+         or 
+         (ifnull(Lineas_Exceso,0) > 0 and ifnull(GB_EXCESO,0) > 1 )  
+ 
+#fin de opcion 2
+--         ifnull(Lineas_Con_Bono_Sin_Uso,0) >0 OR 
+--         ifnull(FLAG_useless_line,0) >= 2  OR  # and 0  >=2
+--         ifnull(Lineas_Exceso,0) > 0 OR 
+--        # -->  ifnull(lineas_GB_Exceso,0) >=1 OR 
+--         #ifnull(LINEAS_TARIFA_ERRONEA,0) > 0  OR  
+               
+        
+--         ifnull(NUM_LLAMADAS_WRONG_TARIFF,0) > 0 OR  
+--         ifnull(NUM_DISC_NEXT_2_MONTHS_DEAC,0) >=1 OR 
+--         ifnull(NUM_DISC_NEXT_MONTH_DEAC,0) >=1 or 
+        
+--         # -->  ifnull(Lineas_Sin_Uso,0) >=1 OR 
+--         # -->  ifnull(lineas_sin_uso_m1,0) >=1 OR 
+--         ifnull(Lineas_Poco_Uso,0) >=1  # OR 
+        
+        # ifnull(BILLING_CLAIMS,0) >=1  or          se elimina este segmento ya que está entrando en la definicion del segmento 1
+--         ifnull(INCR_PORCENTUAL_USO,0)  >= 0.05  # NUEVO 
+--         or ifnull(VARIACION_ABSOLUTA_USO,0) > 5
+        THEN 1 ELSE 0 END AS  SEG_Wrong_Tariff,
+        
+        # # SEG_Competitors
+        # # ========================
+        CASE WHEN 
+
+        (ifnull(Amigos_competencia,0)  < 2   and  ifnull(cust_days_since_last_mob_port,0) < 765 ) or
+        (ifnull(Amigos_competencia,0) <  2   and  ifnull(MIN_LLAMADAS_COMPETENCIA_OUT,0) > 0 )  or
+        
+        ifnull(cust_n_yoigo_mob_port,0) > 0  or 
+        ifnull(FRIENDS_IS_CHURN_GMM,0) > 3   or
+        ifnull(NUM_LLAMADAS_COMPETENCIA_OUT,0) >= 3  or         
+        ifnull(MIN_LLAMADAS_COMPETENCIA_IN,0)> 5  # nuevo 
+              
+        THEN 1 ELSE 0 END AS  SEG_Competitors
+        from   parte_2   ),  #desposicionamiento  parte_2         desposicionamiento
+        
+# # paso 9 Unificacion
+# # ==========================  
+TABLON_1P_SEGMENTOS_decil1_2 AS (select *,       
+        
+        CASE
+              WHEN SEG_proceso>0 THEN '1_PROCESS ISSUE'
+              WHEN SEG_Calidad>0 THEN '2_TECHNICAL PROBLEMS'              
+              WHEN SEG_Wrong_Tariff>0 THEN '4_WRONG TARIFF'  
+              WHEN SEG_Competitors>0 THEN '6_COMPETITORS'
+              WHEN SEG_Heavy_Callers>0 THEN '3_HEAVY CALLERS'
+              
+             ELSE 'SIN ASIGNAR'
+        END AS SEGMENTO_CHURN_1P
+        FROM TABLON_1P_SEGMENTOS
+
+        ),
+        
+Tablon_Seg_Arpu as (select
+          count(*) as registros,
+          count(distinct a.customer_id) as clientes,
+          sum(fuga_real) as target,
+          sum(arpu) as arpu,
+          SEGMENTO_CHURN_1P as SEGMENTACION_MES_ACTUAL
+          from TABLON_1P_SEGMENTOS_decil1_2 a
+          left join #inner join
+          (
+          select
+          customer_id,
+          sum(ifnull(kpi_cost_excl_tax,0)) as arpu
+          from
+          
+          ##### ojo cambiar 
+          ##### ojo cambiar 
+          ##### ojo cambiar 
+          `analitica-bigdata.REPORTING_DETAIL.billing_detail_202006`
+          where arpu_lg='1' and brand_ds='YOIGO' 
+          group by
+          customer_id
+          ) b
+          on a.customer_id=cast(b.customer_id as string)
+          
+          group by
+          SEGMENTACION_MES_ACTUAL
+            ) 
+
+
+select * from  Tablon_Seg_Arpu # TABLON_1P_SEGMENTOS_decil1_2   # TABLON_1P_SEGMENTOS_decil1_2  
